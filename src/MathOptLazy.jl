@@ -761,7 +761,7 @@ end
 
 function _prune_stale!(model::Optimizer, data::_LazyData{F,S}) where {F,S}
     constraints_pruned = 0
-    for i in eachindex(data.status)
+    for i in reverse(eachindex(data.status))
         if _is_stale(model, data, i)
             MOI.delete(model.inner, data.index[i])
             data.index[i] = MOI.ConstraintIndex{F,S}(0)
