@@ -877,44 +877,42 @@ function _stale_solve(model, sense, f)
     return
 end
 
-function test_stale_attributes()
+function _set_iterative(model; kwargs...)
+    algorithm = MathOptLazy.Iterative(; kwargs...)
+    MOI.set(model, MathOptLazy.Algorithm(), algorithm)
+    return
+end
+
+function test_stale_iterative_kwargs()
+    algorithm = MathOptLazy.Iterative()
+    @test algorithm.stale_solve_limit == typemax(Int)
+    @test algorithm.prune_batch_size == 1
+    algorithm =
+        MathOptLazy.Iterative(; stale_solve_limit = 3, prune_batch_size = 4)
+    @test algorithm.stale_solve_limit == 3
+    @test algorithm.prune_batch_size == 4
+    @test_throws ArgumentError MathOptLazy.Iterative(; stale_solve_limit = 0)
+    @test_throws ArgumentError MathOptLazy.Iterative(; prune_batch_size = 0)
     model = MathOptLazy.Optimizer(HiGHS.Optimizer)
-    for (attr, default, value, invalid) in [
-        (MathOptLazy.StaleSolveLimit(), typemax(Int), 3, 0),
-        (MathOptLazy.PruneBatchSize(), 1, 4, 0),
-        (MathOptLazy.BindingTolerance(), 1e-6, 1e-3, -1.0),
-    ]
-        @test MOI.supports(model, attr)
-        @test MOI.get(model, attr) == default
-        MOI.set(model, attr, value)
-        @test MOI.get(model, attr) == value
-        @test_throws ArgumentError MOI.set(model, attr, invalid)
-        MOI.empty!(model)
-        @test MOI.get(model, attr) == value
-    end
-    @test_throws(
-        ArgumentError,
-        MOI.set(model, MathOptLazy.BindingTolerance(), NaN),
-    )
+    MOI.set(model, MathOptLazy.Algorithm(), algorithm)
+    MOI.empty!(model)
+    @test MOI.get(model, MathOptLazy.Algorithm()) == algorithm
     return
 end
 
 function test_is_binding()
-    tol = 1e-3
     s = MOI.LessThan(1.0)
-    @test MathOptLazy._is_binding(1.0, s, tol)
-    @test MathOptLazy._is_binding(0.9995, s, tol)
-    @test !MathOptLazy._is_binding(0.99, s, tol)
+    @test MathOptLazy._is_binding(1.0, s)
+    @test !MathOptLazy._is_binding(0.99, s)
     s = MOI.GreaterThan(1.0)
-    @test MathOptLazy._is_binding(1.0, s, tol)
-    @test MathOptLazy._is_binding(1.0005, s, tol)
-    @test !MathOptLazy._is_binding(1.01, s, tol)
+    @test MathOptLazy._is_binding(1.0, s)
+    @test !MathOptLazy._is_binding(1.01, s)
     s = MOI.Interval(1.0, 2.0)
-    @test MathOptLazy._is_binding(1.0005, s, tol)
-    @test MathOptLazy._is_binding(1.9995, s, tol)
-    @test !MathOptLazy._is_binding(1.5, s, tol)
-    @test MathOptLazy._is_binding(1.5, MOI.EqualTo(1.0), tol)
-    @test MathOptLazy._is_binding(0.5, MOI.ZeroOne(), tol)
+    @test MathOptLazy._is_binding(1.0, s)
+    @test MathOptLazy._is_binding(2.0, s)
+    @test !MathOptLazy._is_binding(1.5, s)
+    @test MathOptLazy._is_binding(1.5, MOI.EqualTo(1.0))
+    @test MathOptLazy._is_binding(0.5, MOI.ZeroOne())
     return
 end
 
@@ -934,15 +932,6 @@ function test_stale_counter()
     return
 end
 
-function test_stale_counter_binding_tolerance()
-    model, x, data = _stale_model()
-    MOI.set(model, MathOptLazy.BindingTolerance(), 2.0)
-    _stale_solve(model, MOI.MAX_SENSE, 1.0 * x[1] + 1.0 * x[2])
-    _stale_solve(model, MOI.MIN_SENSE, 1.0 * x[1] + 1.0 * x[2])
-    @test data.stale == [0, 0]
-    return
-end
-
 function test_stale_counter_no_feasible_point()
     model, x, data = _stale_model()
     _stale_solve(model, MOI.MAX_SENSE, 1.0 * x[1] + 1.0 * x[2])
@@ -955,10 +944,9 @@ function test_stale_counter_no_feasible_point()
     return
 end
 
-function test_prune_automatic()
+function test_prune()
     model, x, data = _stale_model()
-    MOI.set(model, MathOptLazy.StaleSolveLimit(), 2)
-    MOI.set(model, MathOptLazy.PruneBatchSize(), 2)
+    _set_iterative(model; stale_solve_limit = 2, prune_batch_size = 2)
     F, S = MOI.ScalarAffineFunction{Float64}, MOI.LessThan{Float64}
     attr =
         MathOptLazy.NumberOfConstraintsActive{F,MathOptLazy.LazyScalarSet{S}}()
@@ -986,7 +974,7 @@ end
 
 function test_prune_readded()
     model, x, data = _stale_model()
-    MOI.set(model, MathOptLazy.StaleSolveLimit(), 1)
+    _set_iterative(model; stale_solve_limit = 1)
     F, S = MOI.ScalarAffineFunction{Float64}, MOI.LessThan{Float64}
     attr =
         MathOptLazy.NumberOfConstraintsActive{F,MathOptLazy.LazyScalarSet{S}}()
@@ -998,48 +986,6 @@ function test_prune_readded()
     @test all(==(MathOptLazy._kLAZY_CONSTRAINT_ACTIVE), data.status)
     @test data.stale == [0, 0]
     @test MOI.get(model, attr) == 2
-    return
-end
-
-function test_prune_manual()
-    model, x, data = _stale_model()
-    MOI.set(model, MathOptLazy.PruneBatchSize(), 100)
-    @test MathOptLazy.prune_stale_constraints!(model) == 0
-    _stale_solve(model, MOI.MAX_SENSE, 1.0 * x[1] + 1.0 * x[2])
-    _stale_solve(model, MOI.MAX_SENSE, 1.0 * x[1] - 1.0 * x[2])
-    @test data.stale == [0, 1]
-    @test MathOptLazy.prune_stale_constraints!(model) == 0
-    MOI.set(model, MathOptLazy.StaleSolveLimit(), 1)
-    @test MathOptLazy.prune_stale_constraints!(model) == 1
-    @test data.status == [
-        MathOptLazy._kLAZY_CONSTRAINT_ACTIVE,
-        MathOptLazy._kLAZY_CONSTRAINT_INACTIVE,
-    ]
-    @test data.stale == [0, 0]
-    @test MathOptLazy.prune_stale_constraints!(model) == 0
-    _stale_solve(model, MOI.MAX_SENSE, 1.0 * x[1] + 1.0 * x[2])
-    @test MOI.get(model, MOI.VariablePrimal(), x) ≈ [1.0, 1.0]
-    return
-end
-
-function test_prune_manual_jump()
-    model = Model(() -> MathOptLazy.Optimizer(HiGHS.Optimizer))
-    set_silent(model)
-    set_attribute(model, MathOptLazy.StaleSolveLimit(), 1)
-    set_attribute(model, MathOptLazy.PruneBatchSize(), 100)
-    @variable(model, x[1:2] >= 0)
-    @constraint(model, sum(x) <= 10)
-    @constraint(model, [i in 1:2], 1.0 * x[i] <= 1, MathOptLazy.Lazy())
-    @objective(model, Max, sum(x))
-    optimize!(model)
-    @test value.(x) ≈ [1.0, 1.0]
-    @objective(model, Min, sum(x))
-    optimize!(model)
-    @test MathOptLazy.prune_stale_constraints!(model) == 2
-    @test MathOptLazy.prune_stale_constraints!(model) == 0
-    @objective(model, Max, sum(x))
-    optimize!(model)
-    @test value.(x) ≈ [1.0, 1.0]
     return
 end
 

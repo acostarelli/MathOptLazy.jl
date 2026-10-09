@@ -79,17 +79,4 @@ function MathOptLazy.Lazy(
     return MathOptLazy.Lazy(; lazy)
 end
 
-"""
-    MathOptLazy.prune_stale_constraints!(model::JuMP.GenericModel)::Int
-
-Call [`MathOptLazy.prune_stale_constraints!`](@ref) on the
-`MathOptLazy.Optimizer` of `model`.
-
-!!! compat
-    This method requires JuMP to be loaded to activate the package extension.
-"""
-function MathOptLazy.prune_stale_constraints!(model::JuMP.GenericModel)
-    return MathOptLazy.prune_stale_constraints!(JuMP.unsafe_backend(model))
-end
-
 end  # module MathOptLazyJuMPExt

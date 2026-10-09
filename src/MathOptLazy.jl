@@ -124,49 +124,7 @@ struct Algorithm <: MOI.AbstractOptimizerAttribute end
 abstract type AbstractAlgorithm end
 
 """
-    StaleSolveLimit() <: MOI.AbstractOptimizerAttribute
-
-An `MOI.AbstractOptimizerAttribute` to control the number of consecutive solves
-for which an active lazy constraint must be non-binding before it is considered
-stale.
-
-A solve is one call to `MOI.optimize!`. Whether a constraint is binding is
-controlled by [`BindingTolerance`](@ref).
-
-The default is `typemax(Int)`, which means that no constraint is ever stale.
-
-Stale constraints are tracked only by the [`Iterative`](@ref) algorithm.
-"""
-struct StaleSolveLimit <: MOI.AbstractOptimizerAttribute end
-
-"""
-    PruneBatchSize() <: MOI.AbstractOptimizerAttribute
-
-An `MOI.AbstractOptimizerAttribute` to control the number of stale constraints
-that are required before `MOI.optimize!` calls
-[`prune_stale_constraints!`](@ref).
-
-The default is `1`.
-
-See also [`StaleSolveLimit`](@ref).
-"""
-struct PruneBatchSize <: MOI.AbstractOptimizerAttribute end
-
-"""
-    BindingTolerance() <: MOI.AbstractOptimizerAttribute
-
-An `MOI.AbstractOptimizerAttribute` to control the absolute tolerance used to
-decide whether an active lazy constraint is binding. A constraint is binding if
-its primal value is within the tolerance of a bound of its set.
-
-The default is `1e-6`.
-
-See also [`StaleSolveLimit`](@ref).
-"""
-struct BindingTolerance <: MOI.AbstractOptimizerAttribute end
-
-"""
-    Iterative()
+    Iterative(; stale_solve_limit::Int = typemax(Int), prune_batch_size::Int = 1)
 
 This algorithm iteratively solves a sequence of problems that iteratively add
 violated lazy constraints to the main problem.
@@ -189,8 +147,34 @@ warm-start from the previous basis after new constraints are added, whereas
 every iteration of the second phase solves a mixed-integer program from
 scratch. The second phase is still needed because a lazy constraint can be
 violated by an integer solution even if the relaxation satisfies it.
+
+## Stale constraints
+
+An active lazy constraint is stale if it has been non-binding for at least
+`stale_solve_limit` consecutive solves, where a solve is one call to
+`MOI.optimize!` and a constraint is binding if its primal value is equal to a
+bound of its set. The default of `typemax(Int)` means that no constraint is ever
+stale.
+
+`MOI.optimize!` calls [`prune_stale_constraints!`](@ref) before solving if there
+are at least `prune_batch_size` stale constraints.
 """
-struct Iterative <: AbstractAlgorithm end
+struct Iterative <: AbstractAlgorithm
+    stale_solve_limit::Int
+    prune_batch_size::Int
+
+    function Iterative(;
+        stale_solve_limit::Int = typemax(Int),
+        prune_batch_size::Int = 1,
+    )
+        if stale_solve_limit < 1
+            throw(ArgumentError("stale_solve_limit must be at least 1."))
+        elseif prune_batch_size < 1
+            throw(ArgumentError("prune_batch_size must be at least 1."))
+        end
+        return new(stale_solve_limit, prune_batch_size)
+    end
+end
 
 """
     Callback()
@@ -249,9 +233,6 @@ mutable struct Optimizer{OT<:MOI.ModelLike} <: MOI.AbstractOptimizer
     algorithm::AbstractAlgorithm
     lazy::Dict{Tuple{Type,Type},_LazyData}
     silent::Bool
-    stale_solve_limit::Int
-    prune_batch_size::Int
-    binding_tolerance::Float64
     # Result attributes
     barrier_iterations::Int64
     node_count::Int64
@@ -265,9 +246,6 @@ mutable struct Optimizer{OT<:MOI.ModelLike} <: MOI.AbstractOptimizer
             Iterative(),
             Dict{Tuple{Type,Type},_LazyData}(),
             false,
-            typemax(Int),
-            1,
-            1e-6,
             0,
             0,
             0,
@@ -288,48 +266,6 @@ function MOI.set(model::Optimizer, ::Algorithm, value::AbstractAlgorithm)
 end
 
 MOI.Utilities.map_indices(::Function, algorithm::AbstractAlgorithm) = algorithm
-
-### StaleSolveLimit
-
-MOI.supports(::Optimizer, ::StaleSolveLimit) = true
-
-MOI.get(model::Optimizer, ::StaleSolveLimit) = model.stale_solve_limit
-
-function MOI.set(model::Optimizer, ::StaleSolveLimit, value::Int)
-    if value < 1
-        throw(ArgumentError("StaleSolveLimit must be at least 1."))
-    end
-    model.stale_solve_limit = value
-    return
-end
-
-### PruneBatchSize
-
-MOI.supports(::Optimizer, ::PruneBatchSize) = true
-
-MOI.get(model::Optimizer, ::PruneBatchSize) = model.prune_batch_size
-
-function MOI.set(model::Optimizer, ::PruneBatchSize, value::Int)
-    if value < 1
-        throw(ArgumentError("PruneBatchSize must be at least 1."))
-    end
-    model.prune_batch_size = value
-    return
-end
-
-### BindingTolerance
-
-MOI.supports(::Optimizer, ::BindingTolerance) = true
-
-MOI.get(model::Optimizer, ::BindingTolerance) = model.binding_tolerance
-
-function MOI.set(model::Optimizer, ::BindingTolerance, value::Float64)
-    if value < 0
-        throw(ArgumentError("BindingTolerance must be non-negative."))
-    end
-    model.binding_tolerance = value
-    return
-end
 
 ### MOI.Silent
 
@@ -750,19 +686,23 @@ end
 
 ### MathOptLazy.prune_stale_constraints!
 
-function _is_stale(model::Optimizer, data::_LazyData, i::Int)
+function _is_stale(algorithm::Iterative, data::_LazyData, i::Int)
     return data.status[i] == _kLAZY_CONSTRAINT_ACTIVE &&
-           data.stale[i] >= model.stale_solve_limit
+           data.stale[i] >= algorithm.stale_solve_limit
 end
 
-function _number_stale(model::Optimizer, data::_LazyData)
-    return count(i -> _is_stale(model, data, i), eachindex(data.status))
+function _number_stale(algorithm::Iterative, data::_LazyData)
+    return count(i -> _is_stale(algorithm, data, i), eachindex(data.status))
 end
 
-function _prune_stale!(model::Optimizer, data::_LazyData{F,S}) where {F,S}
+function _prune_stale!(
+    model::Optimizer,
+    algorithm::Iterative,
+    data::_LazyData{F,S},
+) where {F,S}
     constraints_pruned = 0
     for i in reverse(eachindex(data.status))
-        if _is_stale(model, data, i)
+        if _is_stale(algorithm, data, i)
             MOI.delete(model.inner, data.index[i])
             data.index[i] = MOI.ConstraintIndex{F,S}(0)
             data.status[i] = _kLAZY_CONSTRAINT_INACTIVE
@@ -773,6 +713,16 @@ function _prune_stale!(model::Optimizer, data::_LazyData{F,S}) where {F,S}
     return constraints_pruned
 end
 
+function _prune_stale!(model::Optimizer, algorithm::Iterative)
+    return sum(
+        d -> _prune_stale!(model, algorithm, d),
+        values(model.lazy);
+        init = 0,
+    )
+end
+
+_prune_stale!(::Optimizer, ::AbstractAlgorithm) = 0
+
 """
     prune_stale_constraints!(model::Optimizer)::Int
 
@@ -780,13 +730,16 @@ Remove every stale lazy constraint from the subproblem and return the number of
 constraints that were removed.
 
 A lazy constraint is stale if it is active in the subproblem and it has been
-non-binding for at least [`StaleSolveLimit`](@ref) consecutive solves. A pruned
+non-binding for at least `stale_solve_limit` consecutive solves. A pruned
 constraint is still part of the model: it will be added to the subproblem again
 if a future solution violates it.
 
 `MOI.optimize!` calls this function before solving if there are at least
-[`PruneBatchSize`](@ref) stale constraints. Call it manually to prune
-regardless of [`PruneBatchSize`](@ref).
+`prune_batch_size` stale constraints. Call it manually to prune regardless of
+`prune_batch_size`.
+
+Stale constraints are tracked only by the [`Iterative`](@ref) algorithm, which
+is where `stale_solve_limit` and `prune_batch_size` are set.
 
 !!! warning
     This function modifies the inner optimizer, which may invalidate the
@@ -801,34 +754,36 @@ julia> import MathOptInterface as MOI
 
 julia> model = MathOptLazy.Optimizer(HiGHS.Optimizer);
 
-julia> MOI.set(model, MathOptLazy.StaleSolveLimit(), 5)
+julia> algorithm = MathOptLazy.Iterative(; stale_solve_limit = 5);
+
+julia> MOI.set(model, MathOptLazy.Algorithm(), algorithm)
 
 julia> MathOptLazy.prune_stale_constraints!(model)
 0
 ```
 """
 function prune_stale_constraints!(model::Optimizer)
-    return sum(d -> _prune_stale!(model, d), values(model.lazy); init = 0)
+    return _prune_stale!(model, model.algorithm)
 end
 
-function _maybe_prune_stale!(model::Optimizer)
-    n = sum(d -> _number_stale(model, d), values(model.lazy); init = 0)
-    if n < model.prune_batch_size
+function _maybe_prune_stale!(model::Optimizer, algorithm::Iterative)
+    n = sum(d -> _number_stale(algorithm, d), values(model.lazy); init = 0)
+    if n < algorithm.prune_batch_size
         return
     end
-    prune_stale_constraints!(model)
+    _prune_stale!(model, algorithm)
     if !model.silent
         println("[MathOptLazy] pruned $(n) stale constraints")
     end
     return
 end
 
-_is_binding(y, s::MOI.LessThan, tol) = y >= s.upper - tol
-_is_binding(y, s::MOI.GreaterThan, tol) = y <= s.lower + tol
-_is_binding(y, s::MOI.Interval, tol) = y <= s.lower + tol || y >= s.upper - tol
+_is_binding(y, s::MOI.LessThan) = y >= s.upper - 1e-2
+_is_binding(y, s::MOI.GreaterThan) = y <= s.lower + 1e-2
+_is_binding(y, s::MOI.Interval) = y <= s.lower + 1e-2 || y >= s.upper - 1e-2
 
 # For sets whose slackness we can't measure, assume they bind and don't prune.
-_is_binding(y, ::MOI.AbstractScalarSet, tol) = true
+_is_binding(y, ::MOI.AbstractScalarSet) = true
 
 function _update_stale!(model::Optimizer, data::_LazyData)
     for (i, (_, s)) in enumerate(data.data)
@@ -836,7 +791,7 @@ function _update_stale!(model::Optimizer, data::_LazyData)
             continue
         end
         y = MOI.get(model.inner, MOI.ConstraintPrimal(), data.index[i])
-        if _is_binding(y, s, model.binding_tolerance)
+        if _is_binding(y, s)
             data.stale[i] = 0
         else
             data.stale[i] += 1
@@ -890,8 +845,8 @@ end
 
 ### MathOptLazy.Iterative
 
-function _optimize!(model::Optimizer, ::Iterative)
-    _maybe_prune_stale!(model)
+function _optimize!(model::Optimizer, algorithm::Iterative)
+    _maybe_prune_stale!(model, algorithm)
     if (undo = _relax_integrality(model.inner)) !== nothing
         if !model.silent
             println("[MathOptLazy] relaxing binary and integer variables")
@@ -903,7 +858,6 @@ function _optimize!(model::Optimizer, ::Iterative)
         undo()
     end
     _iterate(model; start = true)
-    _update_stale!(model)
     return
 end
 
@@ -944,6 +898,7 @@ function _iterate(model::Optimizer; start::Bool)
         if !model.silent
             println("\n[MathOptLazy] added $(constraints_added) constraints")
         end
+        _update_stale!(model)
     end
     return
 end
