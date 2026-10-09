@@ -717,51 +717,6 @@ function _prune_stale!(model::Optimizer, algorithm::Iterative)
     )
 end
 
-_prune_stale!(::Optimizer, ::AbstractAlgorithm) = 0
-
-"""
-    prune_stale_constraints!(model::Optimizer)::Int
-
-Remove every stale lazy constraint from the subproblem and return the number of
-constraints that were removed.
-
-A lazy constraint is stale if it is active in the subproblem and it has been
-non-binding for at least `stale_solve_limit` consecutive solves. A pruned
-constraint is still part of the model: it will be added to the subproblem again
-if a future solution violates it.
-
-`MOI.optimize!` calls this function before solving if there are at least
-`prune_batch_size` stale constraints. Call it manually to prune regardless of
-`prune_batch_size`.
-
-Stale constraints are tracked only by the [`Iterative`](@ref) algorithm, which
-is where `stale_solve_limit` and `prune_batch_size` are set.
-
-!!! warning
-    This function modifies the inner optimizer, which may invalidate the
-    current solution. Query the solution before calling it.
-
-## Example
-
-```julia
-julia> import HiGHS, MathOptLazy
-
-julia> import MathOptInterface as MOI
-
-julia> model = MathOptLazy.Optimizer(HiGHS.Optimizer);
-
-julia> algorithm = MathOptLazy.Iterative(; stale_solve_limit = 5);
-
-julia> MOI.set(model, MathOptLazy.Algorithm(), algorithm)
-
-julia> MathOptLazy.prune_stale_constraints!(model)
-0
-```
-"""
-function prune_stale_constraints!(model::Optimizer)
-    return _prune_stale!(model, model.algorithm)
-end
-
 function _maybe_prune_stale!(model::Optimizer, algorithm::Iterative)
     n = sum(d -> _number_stale(algorithm, d), values(model.lazy); init = 0)
     if n < algorithm.prune_batch_size
