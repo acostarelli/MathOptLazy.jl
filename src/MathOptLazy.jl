@@ -151,13 +151,9 @@ violated by an integer solution even if the relaxation satisfies it.
 ## Stale constraints
 
 An active lazy constraint is stale if it has been non-binding for at least
-`stale_solve_limit` consecutive solves, where a solve is one call to
-`MOI.optimize!` and a constraint is binding if its primal value is equal to a
-bound of its set. The default of `typemax(Int)` means that no constraint is ever
-stale.
-
-`MOI.optimize!` calls [`prune_stale_constraints!`](@ref) before solving if there
-are at least `prune_batch_size` stale constraints.
+`stale_solve_limit` consecutive solves (including internal iterative solves).
+Stale constraints are pruned before solving if there are at least
+`prune_batch_size` stale constraints.
 """
 struct Iterative <: AbstractAlgorithm
     stale_solve_limit::Int
@@ -165,7 +161,7 @@ struct Iterative <: AbstractAlgorithm
 
     function Iterative(;
         stale_solve_limit::Int = typemax(Int),
-        prune_batch_size::Int = 1,
+        prune_batch_size::Int = typemax(Int),
     )
         if stale_solve_limit < 1
             throw(ArgumentError("stale_solve_limit must be at least 1."))
@@ -846,7 +842,6 @@ end
 ### MathOptLazy.Iterative
 
 function _optimize!(model::Optimizer, algorithm::Iterative)
-    _maybe_prune_stale!(model, algorithm)
     if (undo = _relax_integrality(model.inner)) !== nothing
         if !model.silent
             println("[MathOptLazy] relaxing binary and integer variables")
@@ -857,6 +852,7 @@ function _optimize!(model::Optimizer, algorithm::Iterative)
         end
         undo()
     end
+    _maybe_prune_stale!(model, algorithm)
     _iterate(model; start = true)
     return
 end
@@ -878,6 +874,7 @@ function _iterate(model::Optimizer; start::Bool)
             println("[MathOptLazy] solving current subproblem\n")
         end
         _optimize_inner!(model)
+        _update_stale!(model)
         if MOI.get(model, MOI.TerminationStatus()) == MOI.DUAL_INFEASIBLE
             # The problem is unbounded, but it might not be if we add more
             # constraints.
@@ -898,7 +895,6 @@ function _iterate(model::Optimizer; start::Bool)
         if !model.silent
             println("\n[MathOptLazy] added $(constraints_added) constraints")
         end
-        _update_stale!(model)
     end
     return
 end
